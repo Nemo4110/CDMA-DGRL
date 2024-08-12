@@ -70,19 +70,36 @@ class SingelGnn(nn.Module):
         return node_feats
 
 
-class LinksPredictor(nn.Module):
+class PCAttendLayer(nn.Module):
+    r""""patient condition attention layer
+    每个target的emb作为query，去问过往天的患者病情表示要施加怎样的注意力
+    query：[S, L, H]
+    key：[S, 1, H]
+    """
+    def __init__(self, hidden_dim, num_heads, dropout_prob=0.1):
+        super().__init__()
+        self.mha = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
+        self.droupout = nn.Dropout(dropout_prob)
+        self.ln = nn.LayerNorm(hidden_dim)
+
+    def forward(self, query, key):
+        x = self.mha(query, key, key)[0]
+        x = self.ln(self.droupout(x) + query)
+        return x
+
+
+class Predictor(nn.Module):
     def __init__(self, hidden_dim=128):
         super().__init__()
-        self.re_weight_a = nn.Linear(in_features=hidden_dim, out_features=hidden_dim)
-        self.re_weight_b = nn.Linear(in_features=hidden_dim, out_features=hidden_dim)
-        self.pred_head = nn.Linear(hidden_dim*2, 1)
+        self.pc_att = PCAttendLayer(hidden_dim, 8)
+        self.pred_head = nn.Linear(hidden_dim, 1)
 
-    def forward(self, cur_day_patient_condition, item_features_selected):
-        a = self.re_weight_a(cur_day_patient_condition)
-        b = self.re_weight_b(item_features_selected)
-
-        a = a.repeat(b.size(0), 1)
-        scores = self.pred_head(torch.cat([a, b], dim=-1))
+    def forward(self, patient_condition_so_far, item_features_selected):
+        num_target_item = item_features_selected.size(0)
+        patient_condition_so_far = patient_condition_so_far.unsqueeze(0).repeat(num_target_item, 1, 1)  # [S, H] -> [L, S, H]
+        item_features_selected = item_features_selected.view(num_target_item, 1, -1)  # [L, H] -> [L, 1, H]
+        item_features_selected = self.pc_att(item_features_selected, patient_condition_so_far)
+        scores = self.pred_head(item_features_selected.squeeze(1))
         return scores.squeeze(1)
 
 

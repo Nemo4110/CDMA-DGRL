@@ -14,7 +14,7 @@ from dataset.unified import (SourceDataFrames,
                              list_selected_prescriptions_columns)
 from utils.config import HeteroGraphConfig, MappingManager, GNNConfig, max_adm_length
 from utils.enum_type import FeatureType
-from model.layers import LinksPredictor, SingelGnn, GraphEmbeddingLayer
+from model.layers import Predictor, SingelGnn, GraphEmbeddingLayer
 
 
 class BackBoneV2(nn.Module):
@@ -72,8 +72,7 @@ class BackBoneV2(nn.Module):
         self.gnn = SingelGnn(self.h_dim, self.gnn_conf.gnn_type, self.gnn_conf.gnn_layer_num)
         self.gnn = to_hetero(self.gnn, metadata=(self.gnn_conf.node_types, self.gnn_conf.edge_types))
 
-        self.pc_att = PCAttendLayer(self.h_dim, 8)
-        self.lp = LinksPredictor(self.h_dim)
+        self.predictor = Predictor(self.h_dim)
 
         # parameters initialization
         self.apply(self._init_weights)
@@ -185,13 +184,11 @@ class BackBoneV2(nn.Module):
         logits = []
         labels = []
         for d, cur_day_hg in enumerate(total_hgs[1:]):  # 这里要扣除第一天，因为我们预测从第二天开始的序列
-            pre_day_patient_conditions = patient_conditions[:, d, :]  # 前一天的病情表示，由之前天attention聚合而来
             pre_day_item_feats_enc = item_feats_enc[self.goal][d, :, :]  # 前一天的物品emb
             cur_day_seq_to_be_judged, cur_day_01_labels = self._get_cur_day_seq_to_be_judged_and_labels(cur_day_hg)
             cur_day_seq_to_be_judged_emb = pre_day_item_feats_enc[cur_day_seq_to_be_judged]  # 取出相应行
-            cur_day_seq_to_be_judged_emb = self.pc_att(
-                query=cur_day_seq_to_be_judged_emb, key=patient_conditions[0, :d+1, :])  # [N_item, H] & [d, H]
-            cur_day_logits = self.lp(pre_day_patient_conditions, cur_day_seq_to_be_judged_emb)
+            pc_so_far = patient_conditions[0, :d + 1, :]  # 到昨天为止的患者病情表示，[d, H]
+            cur_day_logits = self.predictor(pc_so_far, cur_day_seq_to_be_judged_emb)
             logits.append(cur_day_logits)
             labels.append(cur_day_01_labels)
 
@@ -230,23 +227,6 @@ class BackBoneV2(nn.Module):
         logits = torch.cat(logits)
         labels = torch.cat(labels)
         return F.binary_cross_entropy_with_logits(logits, labels)
-
-
-class PCAttendLayer(nn.Module):
-    r""""patient condition attention layer
-    每个target的emb作为query，去问过往天的患者病情表示要施加怎样的注意力
-    query：[L, H]
-    key：[S, H]
-    """
-    def __init__(self, hidden_dim, num_heads, dropout_prob = 0.1):
-        super().__init__()
-        self.mha = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
-        self.droupout = nn.Dropout(dropout_prob)
-
-    def forward(self, query, key):
-        x = self.mha(query, key, key)[0]
-        x = self.droupout(x)
-        return x
 
 
 if __name__ == '__main__':
