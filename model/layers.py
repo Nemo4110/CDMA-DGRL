@@ -70,12 +70,8 @@ class SingelGnn(nn.Module):
         return node_feats
 
 
-class PCAttendLayer(nn.Module):
-    r""""patient condition attention layer
-    每个target的emb作为query，去问过往天的患者病情表示要施加怎样的注意力
-    query：[S, L, H]
-    key：[S, 1, H]
-    """
+class MHALayer(nn.Module):
+    """多头注意力层"""
     def __init__(self, hidden_dim, num_heads, dropout_prob=0.1):
         super().__init__()
         self.mha = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
@@ -84,22 +80,36 @@ class PCAttendLayer(nn.Module):
 
     def forward(self, query, key):
         x = self.mha(query, key, key)[0]
-        x = self.ln(self.droupout(x) + query)
+        x = self.ln(self.droupout(x) + query)  # residual connect
         return x
 
 
 class Predictor(nn.Module):
+    # TODO: 增加对is_gnn_only的判断逻辑
     def __init__(self, hidden_dim=128):
         super().__init__()
-        self.pc_att = PCAttendLayer(hidden_dim, 8)
+        # 每个target的emb作为query，去问过往天的患者病情表示要施加怎样的注意力
+        # query：[S, L, H]
+        #   key：[S, 1, H]
+        self.pc_att = MHALayer(hidden_dim, 8)
+        self.ht_att = MHALayer(hidden_dim, 8)  # 对历史物品的注意力
         self.pred_head = nn.Linear(hidden_dim, 1)
 
-    def forward(self, patient_condition_so_far, item_features_selected):
+    def forward(self, patient_condition_so_far, item_features_selected, history_items_emb):
         num_target_item = item_features_selected.size(0)
-        patient_condition_so_far = patient_condition_so_far.unsqueeze(0).repeat(num_target_item, 1, 1)  # [S, H] -> [L, S, H]
+
         item_features_selected = item_features_selected.view(num_target_item, 1, -1)  # [L, H] -> [L, 1, H]
-        item_features_selected = self.pc_att(item_features_selected, patient_condition_so_far)
-        scores = self.pred_head(item_features_selected.squeeze(1))
+
+        # attention
+        patient_condition_so_far = patient_condition_so_far.unsqueeze(0).repeat(num_target_item, 1, 1)
+        ti_att_pc = self.pc_att(item_features_selected, patient_condition_so_far)  # 目标物品对历史病情的注意力
+        if history_items_emb is not None:  # 目标物品对历史物品的注意力
+            history_items_emb = history_items_emb.unsqueeze(0).repeat(num_target_item, 1, 1)  # [S, H] -> [L, S, H]
+            ti_att_ht = self.ht_att(item_features_selected, history_items_emb)
+            x = ti_att_ht + ti_att_pc
+        else:
+            x = ti_att_pc
+        scores = self.pred_head(x.squeeze(1))
         return scores.squeeze(1)
 
 

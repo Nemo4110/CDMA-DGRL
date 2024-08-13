@@ -185,27 +185,39 @@ class BackBoneV2(nn.Module):
         labels = []
         for d, cur_day_hg in enumerate(total_hgs[1:]):  # 这里要扣除第一天，因为我们预测从第二天开始的序列
             pre_day_item_feats_enc = item_feats_enc[self.goal][d, :, :]  # 前一天的物品emb
+            history_items = self._get_cur_day_item_seq(total_hgs[d])[1, :]  # 前一天的历史物品序列
+            if history_items.size(0) > 0:
+                history_items_emb = pre_day_item_feats_enc[history_items]
+            else:
+                history_items_emb = None
+
+            # 当前天要判断的target items 及 对应label
             cur_day_seq_to_be_judged, cur_day_01_labels = self._get_cur_day_seq_to_be_judged_and_labels(cur_day_hg)
             cur_day_seq_to_be_judged_emb = pre_day_item_feats_enc[cur_day_seq_to_be_judged]  # 取出相应行
+
             pc_so_far = patient_conditions[0, :d + 1, :]  # 到昨天为止的患者病情表示，[d, H]
-            cur_day_logits = self.predictor(pc_so_far, cur_day_seq_to_be_judged_emb)
+            cur_day_logits = self.predictor(pc_so_far, cur_day_seq_to_be_judged_emb, history_items_emb)
+
             logits.append(cur_day_logits)
             labels.append(cur_day_01_labels)
 
         return logits, labels  # 按天收集
 
+    def _get_cur_day_item_seq(self, hg):
+        if self.goal == "drug":
+            return hg["admission", "took", "drug"].edge_index
+        elif self.goal == "labitem":
+            return hg["admission", "did", "labitem"].edge_index
+        else:
+            raise NotImplementedError
+
     def _get_cur_day_seq_to_be_judged_and_labels(self, hg):
         r"""获取当天需要判断的物品序列"""
 
         # STEP 1: 负采样
-        if self.goal == "drug":
-            pos_indices = hg["admission", "took", "drug"].edge_index
-            neg_indices = OneAdmOneHG.neg_sample_for_cur_day(
-                pos_indices, num_itm_nodes=self.gnn_conf.mapper.node_type_to_node_num["drug"])
-        else:  # "labitem"
-            pos_indices = hg["admission", "did", "labitem"].edge_index
-            neg_indices = OneAdmOneHG.neg_sample_for_cur_day(
-                pos_indices, num_itm_nodes=self.gnn_conf.mapper.node_type_to_node_num["labitem"])
+        pos_indices = self._get_cur_day_item_seq(hg)
+        neg_indices = OneAdmOneHG.neg_sample_for_cur_day(
+            pos_indices, num_itm_nodes=self.gnn_conf.mapper.node_type_to_node_num[self.goal])
 
         # STEP 2：构建正负序列及标签
         cur_day_pos = pos_indices[1, :]
