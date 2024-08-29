@@ -12,7 +12,7 @@ from dataset.unified import SourceDataFrames, OneAdmOneHG
 from model.backbone import BackBoneV2
 from utils.misc import get_latest_model_ckpt, EarlyStopper
 from utils.config import HeteroGraphConfig, GNNConfig
-from utils.metrics import convert2df
+from utils.metrics import convert2df, save_results
 
 
 if __name__ == '__main__':
@@ -54,7 +54,9 @@ if __name__ == '__main__':
     gnn_conf = GNNConfig(args.gnn_type, args.gnn_layer_num, node_types, edge_types)
     model = BackBoneV2(sources_dfs, args.goal, args.hidden_dim, gnn_conf, device,
                        args.num_encoder_layers, args.embedding_size, args.is_gnn_only).to(device)
+
     os.makedirs(args.path_dir_model_hub, exist_ok=True)
+    os.makedirs(args.path_dir_results, exist_ok=True)
 
     if args.train:
         train_dataset = OneAdmOneHG(sources_dfs, "train")
@@ -129,4 +131,4 @@ if __name__ == '__main__':
                 collector.append(convert2df(logits, labels))
 
         results: pd.DataFrame = pd.concat(collector, axis=0)
-        results.to_csv(os.path.join(args.path_dir_results, f"{ckpt_filename}.csv.gz"), compression='gzip')
+        save_results(args.path_dir_results, results, ckpt_filename, args.notes)

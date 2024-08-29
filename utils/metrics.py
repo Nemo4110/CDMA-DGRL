@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 import torch
-import pickle
+import time
 
 from sklearn.metrics import \
     auc, \
@@ -13,7 +13,6 @@ from sklearn.metrics import \
     f1_score, \
     precision_score, \
     recall_score, \
-    precision_recall_curve, \
     average_precision_score
 from utils.ddi import DDICalculator
 from typing import List
@@ -189,3 +188,32 @@ def convert2df(logits: torch.tensor, labels: torch.tensor) -> pd.DataFrame:
         })
         each_day_collector.append(curr_day_df)
     return pd.concat(each_day_collector, axis=0)
+
+
+def calc_metrics(results):
+    return {
+        "rocauc":       roc_auc_score(results['label'].values, results['score'].values, average='macro'),
+        "ap": average_precision_score(results['label'].values, results['score'].values, average='macro'),
+        "acc":         accuracy_score(results['label'].values, (results['score'] > 0.5).values),
+        "precision":  precision_score(results['label'].values, (results['score'] > 0.5).values),
+        "recall":        recall_score(results['label'].values, (results['score'] > 0.5).values, zero_division=0),
+        "f1_score":          f1_score(results['label'].values, (results['score'] > 0.5).values, zero_division=0)
+    }
+
+
+def save_results(path_dir_results, results, ckpt_filename, notes):
+    assert notes is not None  # 实验备注必须填写！
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    new_row = {
+        "timestamp": timestamp,
+        "ckpt_filename": ckpt_filename,
+        "notes": notes,
+        **calc_metrics(results)
+    }
+    result_file = os.path.join(path_dir_results, "results.csv")
+    if os.path.exists(result_file):
+        df_results = pd.read_csv(result_file, index_col=0)
+        df_results = df_results.append(new_row, ignore_index=True)
+    else:
+        df_results = pd.DataFrame(new_row, index=[0])
+    df_results.to_csv(result_file, index=False)
