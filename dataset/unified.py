@@ -792,11 +792,12 @@ class DFDataset(Dataset):
     def __init__(self, pre_dataset):
         name = pre_dataset.__class__.__name__
         split = pre_dataset.split
-        self.dataframe = self._get_preprocessed(name, split)  # 如果处理过，就直接加载
+        item_type = pre_dataset.item_type
+        self.dataframe = self._get_preprocessed(name, split, item_type)  # 如果处理过，就直接加载
 
         if self.dataframe is None:
             self._collect_all_shard(pre_dataset)
-            self._save(name, split)
+            self._save(name, split, item_type)
 
     def _collect_all_shard(self, pre_dataset: Union[SingleItemType,
                                                     SingleItemTypeForContextAwareRec,
@@ -809,18 +810,18 @@ class DFDataset(Dataset):
         self.dataframe = pd.concat(all_adm_interaction, axis=0)
         print("> done!")
 
-    def _get_preprocessed(self, name, split):
+    def _get_preprocessed(self, name, split, item_type):
         data_folder = self._get_data_folder(name)
-        filename = os.path.join(data_folder, f"{split}.csv.gz")
+        filename = os.path.join(data_folder, f"{split}_{item_type}.csv.gz")
         if os.path.isfile(filename):
             return pd.read_csv(filename, index_col=0, dtype={"history": "string"})
         else:
             return None
 
-    def _save(self, name, split):
+    def _save(self, name, split, item_type):
         data_folder = self._get_data_folder(name)
         os.makedirs(data_folder, exist_ok=True)
-        filename = os.path.join(data_folder, f"{split}.csv.gz")
+        filename = os.path.join(data_folder, f"{split}_{item_type}.csv.gz")
         self.dataframe.to_csv(filename, compression='gzip')
 
     def _get_data_folder(self, name):

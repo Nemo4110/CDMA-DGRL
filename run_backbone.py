@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from dataset.unified import SourceDataFrames, OneAdmOneHG
 from model.backbone import BackBoneV2
-from utils.misc import get_latest_model_ckpt
+from utils.misc import get_latest_model_ckpt, EarlyStopper
 from utils.config import HeteroGraphConfig, GNNConfig
 from utils.metrics import convert2df
 
@@ -25,19 +25,17 @@ if __name__ == '__main__':
     parser.add_argument("--hidden_dim",                   type=int,   default=256)
     parser.add_argument("--embedding_size",               type=int,   default=10)
     parser.add_argument("--lr",                           type=float, default=0.001)
-    parser.add_argument("--is_gnn_only",      action="store_true",    default=False,                help="whether to only use GNN")
-    # TODO: 增加只使用GNN的模型（消融）
 
-    # Paths
     parser.add_argument("--root_path_dataset",  default=constant.PATH_MIMIC_III_ETL_OUTPUT, help="path where dataset directory locates")  # in linux
     parser.add_argument("--path_dir_model_hub", default=r"./model/hub",                     help="path where models save")
     parser.add_argument("--path_dir_results",   default=r"./results",                       help="path where results save")
-    parser.add_argument("--path_dir_thresholds",default=r"./thresholds",                    help="path where thresholds save")
 
     # Experiment settings
     parser.add_argument("--item_type",                              default="MIX")
     parser.add_argument("--goal",                                   default="drug",     help="the goal of the recommended task, in ['drug', 'labitem']")
+    parser.add_argument("--is_gnn_only",      action="store_true",  default=False,      help="whether to only use GNN")
     parser.add_argument("--train",            action="store_true",  default=False)
+    parser.add_argument("--patience",         type=int,             default=3)
     parser.add_argument("--test",             action="store_true",  default=False)
     parser.add_argument("--test_model_state_dict",                  default=None,      help="test only model's state_dict file name")  # must be specified when --train=False!
     parser.add_argument("--model_ckpt",                             default=None,      help="the .pt filename where stores the state_dict of model")
@@ -53,7 +51,8 @@ if __name__ == '__main__':
     else:
         node_types, edge_types = HeteroGraphConfig.use_one_edge_type(item_type=args.item_type)
     gnn_conf = GNNConfig(args.gnn_type, args.gnn_layer_num, node_types, edge_types)
-    model = BackBoneV2(sources_dfs, args.goal, args.hidden_dim, gnn_conf, device, args.num_encoder_layers, args.embedding_size).to(device)
+    model = BackBoneV2(sources_dfs, args.goal, args.hidden_dim, gnn_conf, device,
+                       args.num_encoder_layers, args.embedding_size, args.is_gnn_only).to(device)
     os.makedirs(args.path_dir_model_hub, exist_ok=True)
 
     if args.train:
@@ -61,6 +60,7 @@ if __name__ == '__main__':
         valid_dataset = OneAdmOneHG(sources_dfs, "val")
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
         min_loss = float("inf")
+        early_stopper = EarlyStopper(args.patience, False)
         if args.use_gpu:
             torch.cuda.empty_cache()
         train_metric = d2l.Accumulator(2)  # train loss, iter num
@@ -89,11 +89,19 @@ if __name__ == '__main__':
                         validloss = BackBoneV2.get_loss(logits, labels)
                         valid_metric.add(validloss.item(), 1)
                         train_loop.set_postfix_str(f'valid loss: {validloss.item():.4f}')
+
                     valid_loss = valid_metric[0] / valid_metric[1]
-                    if valid_loss < min_loss or i == (len(train_dataset) - 1):  # 有更小的valid_loss或到最后了
-                        min_loss = min(min_loss, valid_loss)
-                        model_name = f"loss_{valid_loss:.4f}_{model.__class__.__name__}_goal_{args.goal}.pt"
-                        torch.save(model.state_dict(), os.path.join(args.path_dir_model_hub, model_name))
+                    early_stopper(valid_loss)
+                    # 在没有早停的前提下
+                    if not early_stopper.early_stop:
+                        # 有更小的valid_loss，或到最后了且valid_loss更小了
+                        if valid_loss < min_loss or (i == (len(train_dataset) - 1) and valid_loss < min_loss):
+                            min_loss = min(min_loss, valid_loss)
+                            model_name = f"loss_{valid_loss:.4f}_{model.__class__.__name__}_goal_{args.goal}.pt"
+                            torch.save(model.state_dict(), os.path.join(args.path_dir_model_hub, model_name))
+                    else:
+                        print("Early stop due to increasing valid loss!")
+                        break  # 早停
                     model.train()
 
         print(f"avg. train loss: {train_metric[0] / train_metric[1]:.4f}")

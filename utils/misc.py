@@ -60,3 +60,25 @@ def set_color(log, color, highlight=True):
         prev_log += "0;3"
     prev_log += str(index) + "m"
     return prev_log + log + "\033[0m"
+
+
+class EarlyStopper:
+    def __init__(self, patience=5, verbose=False):
+        self.patience = patience
+        self.verbose = verbose
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+
+    def __call__(self, score):
+        if self.best_score is None:
+            self.best_score = score
+        elif score < self.best_score:  # Assuming lower score is better (e.g., loss)
+            self.best_score = score
+            self.counter = 0  # 重置耐心计数器
+        else:
+            self.counter += 1
+            if self.verbose:
+                print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True

@@ -153,7 +153,7 @@ if __name__ == '__main__':
         test_dataloader = torchdata.DataLoader(
             test_itr_dataset, batch_size=args.batch_size,
             shuffle=False, pin_memory=True, collate_fn=DFDataset.collect_fn)
-        model = model_class(config, test_pre_dataset).to(device)
+        model = model_class(config, test_pre_dataset).to(device)  # 注意这里重新创建了
 
         if not args.train:
             path2save = os.path.join(args.path_dir_model_hub, model_class.__bases__[0].__name__, model_class.__name__)
@@ -167,7 +167,7 @@ if __name__ == '__main__':
             sd = torch.load(sd_path, map_location=device)
             model.load_state_dict(sd)
         else:
-            ckpt_filename = model_name
+            raise "need model checkpoint!"
 
         model.eval()
         with torch.no_grad():

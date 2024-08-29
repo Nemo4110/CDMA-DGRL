@@ -21,11 +21,13 @@ class DIN(SequentialRecommender):
         # define layers and loss
         self.embedding_layer = SequentialEmbeddingLayer(config, dataset)
 
-        if len(self.embedding_layer.item_float_field_names) > 0:
-            num_item_feature = len(self.embedding_layer.item_token_field_names) + 1 + 1  # for conceited id emb
-        else:
-            num_item_feature = len(self.embedding_layer.item_token_field_names) + 1
-        self.dnn_list = [3 * num_item_feature * self.embedding_size, ] + self.mlp_hidden_size
+        # 第一个+1是因为 conceited id emb
+        num_item_feature = len(self.embedding_layer.item_token_field_names) + 1 \
+                        + (len(self.embedding_layer.item_float_field_names) > 0)
+        num_user_feature = len(self.embedding_layer.user_token_field_names) \
+                        + (len(self.embedding_layer.user_float_field_names) > 0)
+        self.dnn_list = [3*num_item_feature*self.embedding_size
+                         + num_user_feature*self.embedding_size, ] + self.mlp_hidden_size
         self.dnn_mlp_layers = MLPLayers(self.dnn_list, activation="Dice", dropout=self.dropout_prob, bn=True)
         self.att_list = [
             4 * num_item_feature * self.embedding_size
@@ -70,7 +72,7 @@ class DIN(SequentialRecommender):
 
         # input the DNN to get the prediction score
         din_in = torch.cat(
-            [user_emb, target_item_feat_emb, user_emb * target_item_feat_emb], dim=-1
+            [user_embedding, user_emb, target_item_feat_emb, user_emb * target_item_feat_emb], dim=-1
         )
         din_out = self.dnn_mlp_layers(din_in)
         preds = self.dnn_predict_layers(din_out)

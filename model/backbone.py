@@ -25,7 +25,8 @@ class BackBoneV2(nn.Module):
                  gnn_conf: GNNConfig,
                  device,
                  num_enc_layers: int = 6,
-                 embedding_size: int = 10):
+                 embedding_size: int = 10,
+                 is_gnn_only: bool = False):
         super().__init__()
         self.source_dfs = source_dfs  # 提供有用的信息
         assert goal in ["drug", "labitem"]
@@ -35,6 +36,7 @@ class BackBoneV2(nn.Module):
         self.embedding_size = embedding_size
         self.gnn_conf = gnn_conf  # 可以用来控制纳入考虑的边类型
         self.device = device
+        self.is_gnn_only = is_gnn_only
 
         self.node_types = self.gnn_conf.node_types
         self.edge_types = self.gnn_conf.edge_types
@@ -66,8 +68,9 @@ class BackBoneV2(nn.Module):
             for edge_type in self.edge_types if "rev" not in edge_type[1]
         })
 
-        encoder_layer = nn.TransformerEncoderLayer(d_model=self.h_dim, nhead=8, batch_first=True)
-        self.patient_condition_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_enc_layers)
+        if not self.is_gnn_only:
+            encoder_layer = nn.TransformerEncoderLayer(d_model=self.h_dim, nhead=8, batch_first=True)
+            self.patient_condition_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_enc_layers)
 
         self.gnn = SingelGnn(self.h_dim, self.gnn_conf.gnn_type, self.gnn_conf.gnn_layer_num)
         self.gnn = to_hetero(self.gnn, metadata=(self.gnn_conf.node_types, self.gnn_conf.edge_types))
@@ -176,10 +179,10 @@ class BackBoneV2(nn.Module):
             for node_type, x in node_feats_enc.items() if (node_type != "admission" and node_type in self.node_types)
         }
 
-        # attention
         patient_conditions = node_feats_enc["admission"].unsqueeze(0)
-        subsequent_mask = nn.Transformer.generate_square_subsequent_mask(patient_conditions.size(1)).to(self.device)
-        patient_conditions = self.patient_condition_encoder(patient_conditions, mask=subsequent_mask)
+        if not self.is_gnn_only:
+            subsequent_mask = nn.Transformer.generate_square_subsequent_mask(patient_conditions.size(1)).to(self.device)
+            patient_conditions = self.patient_condition_encoder(patient_conditions, mask=subsequent_mask)
 
         logits = []
         labels = []
@@ -246,10 +249,11 @@ if __name__ == '__main__':
     dataset = OneAdmOneHG(sources_dfs, "val")
 
     hidden_dim, device = 256, torch.device('cpu')
-    node_types, edge_types = HeteroGraphConfig.use_all_edge_type()
+    # node_types, edge_types = HeteroGraphConfig.use_all_edge_type()
+    node_types, edge_types = HeteroGraphConfig.use_one_edge_type("drug")
     gnn_conf = GNNConfig("GENConv", 3, node_types, edge_types)
 
-    model = BackBoneV2(sources_dfs, "drug", hidden_dim, gnn_conf, device, 3, 10)
+    model = BackBoneV2(sources_dfs, "drug", hidden_dim, gnn_conf, device, 3, 10, True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
 
     for epoch in range(10):
