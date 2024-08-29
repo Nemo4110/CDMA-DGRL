@@ -97,7 +97,7 @@ if __name__ == '__main__':
                     
                     early_stopper(valid_loss, model)
                     if early_stopper.is_stop or i == (len(train_dataset) - 1):  # 早停了或到训练集遍历到最后了
-                        model_name = f"loss_{valid_loss:.4f}_{model.__class__.__name__}_goal_{args.goal}.pt"
+                        model_name = f"loss_{early_stopper.best_score:.4f}_{model.__class__.__name__}_goal_{args.goal}.pt"
                         early_stopper.save_checkpoint(args.path_dir_model_hub, model_name, args.notes)  # 保存valid_loss最低的模型参数检查点
                         break
 
