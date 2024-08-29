@@ -1,7 +1,8 @@
 import torch
 import os
 import glob
-
+import time
+import pandas as pd
 from typing import List, Dict, Tuple
 
 
@@ -68,17 +69,43 @@ class EarlyStopper:
         self.verbose = verbose
         self.counter = 0
         self.best_score = None
-        self.early_stop = False
+        self.is_stop = False
+        self.best_model_wts = None
 
-    def __call__(self, score):
+    def __call__(self, score, model):
         if self.best_score is None:
             self.best_score = score
+            self.best_model_wts = model.state_dict()
         elif score < self.best_score:  # Assuming lower score is better (e.g., loss)
             self.best_score = score
             self.counter = 0  # 重置耐心计数器
+            self.best_model_wts = model.state_dict()
         else:
             self.counter += 1
             if self.verbose:
                 print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
             if self.counter >= self.patience:
-                self.early_stop = True
+                self.is_stop = True
+                print("Early stop due to increasing valid loss!")
+
+    def _log(self, path_to_save, model_name, notes):
+        # 保存模型checkpoint时，往log.csv记录这次的实验信息，供后续查阅
+        assert notes is not None  # 实验备注必须填写！
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        new_row = {
+            "timestamp": timestamp,
+            "valid_loss": self.best_score,
+            "model_name": model_name,
+            "notes": notes,  # 应记录实验描述，以及运行实验脚本的参数
+        }
+        log_file = os.path.join(path_to_save, "log.csv")
+        if os.path.exists(log_file):
+            df = pd.read_csv(log_file, index_col=0)
+            df = df.append(new_row, ignore_index=True)
+        else:
+            df = pd.DataFrame(new_row, index=[0])
+        df.to_csv(log_file, index=False)
+
+    def save_checkpoint(self, path_to_save, model_name, notes):
+        self._log(path_to_save, model_name, notes)
+        torch.save(self.best_model_wts, os.path.join(path_to_save, model_name))
