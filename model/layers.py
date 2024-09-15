@@ -11,38 +11,23 @@ from typing import List
 
 
 class PositionalEncoding(nn.Module):
-    r"""
-        Add position encoding information for each timestep.
-    Refs:
-        - <https://jalammar.github.io/illustrated-transformer/>
-        - <https://zhuanlan.zhihu.com/p/338592312>
-        - <https://zhuanlan.zhihu.com/p/454482273>
-    """
-    def __init__(self, hidden_dim, max_timestep):
-        super().__init__()
+    """Positional encoding.
 
-        pe = torch.zeros(max_timestep, hidden_dim)
+    Defined in :numref:`sec_self-attention-and-positional-encoding`"""
+    def __init__(self, num_hiddens, dropout, max_len=1000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(dropout)
+        # Create a long enough `P`
+        self.P = torch.zeros((1, max_len, num_hiddens))
+        X = torch.arange(max_len, dtype=torch.float32).reshape(
+            -1, 1) / torch.pow(10000, torch.arange(
+            0, num_hiddens, 2, dtype=torch.float32) / num_hiddens)
+        self.P[:, :, 0::2] = torch.sin(X)
+        self.P[:, :, 1::2] = torch.cos(X)
 
-        position = torch.arange(0, max_timestep, dtype=torch.float).unsqueeze(1)  # [max_timestep, 1]
-
-        # *** the temperature modefied due to the experiment result of DAB-DETR ***
-        # div_term = torch.exp(torch.arange(0, hidden_dim, 2).float() * (-math.log(10000.0) / hidden_dim))
-        div_term = torch.exp(torch.arange(0, hidden_dim, 2).float() * (-math.log(20.0) / hidden_dim))
-
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-
-        pe = pe.unsqueeze(0).transpose(0, 1)  # [len, batch, hidden_dim]
-        pe.requires_grad = False
-
-        self.register_buffer('pe', pe)
-        # print(self.pe.shape)  # torch.Size([20, 1, 64])
-
-    def forward(self, x):
-        if self.pe.device != x.device:
-            self.pe.to(x.device)
-        # return x + self.pe[:x.size(0), :]
-        return x + self.pe  # using broadcast mechanism
+    def forward(self, X):
+        X = X + self.P[:, :X.shape[1], :].to(X.device)
+        return self.dropout(X)
 
 
 class SingelGnn(nn.Module):
@@ -896,3 +881,189 @@ class AdditiveAttention(nn.Module):  #@save
         self.attention_weights = masked_softmax(scores, valid_lens)
         # Shape of values: (batch_size, no. of key-value pairs, value dimension)
         return torch.bmm(self.dropout(self.attention_weights), values)
+
+
+class AdditiveAttention(nn.Module):  #@save
+    """Additive attention."""
+    def __init__(self, num_hiddens, dropout, **kwargs):
+        super(AdditiveAttention, self).__init__(**kwargs)
+        # 3个映射矩阵，将最后一维映射到相同维度
+        self.W_k = nn.LazyLinear(num_hiddens, bias=False)
+        self.W_q = nn.LazyLinear(num_hiddens, bias=False)
+        self.w_v = nn.LazyLinear(1, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, queries, keys, values, valid_lens):
+        queries, keys = self.W_q(queries), self.W_k(keys)
+        # After dimension expansion,
+        # shape of queries: (batch_size, no. of queries, 1,         num_hiddens) and
+        # shape of keys:    (batch_size, 1, no. of key-value pairs, num_hiddens).
+        # Sum them up with broadcasting
+        features = queries.unsqueeze(2) + keys.unsqueeze(1)
+        features = torch.tanh(features)
+        # There is only one output of self.w_v, so we remove the last
+        # one-dimensional entry from the shape.
+        # Shape of scores: (batch_size, no. of queries, no. of key-value pairs)
+        scores = self.w_v(features).squeeze(-1)
+        self.attention_weights = masked_softmax(scores, valid_lens)
+        # Shape of values: (batch_size, no. of key-value pairs, value dimension)
+        return torch.bmm(self.dropout(self.attention_weights), values)
+
+
+class DotProductAttention(nn.Module):
+    """Scaled dot product attention."""
+    def __init__(self, dropout):
+        super().__init__()
+        self.dropout = nn.Dropout(dropout)
+
+    # Shape of queries:    (batch_size, no. of queries,         d)  # q 和 k 的最后一维需要是一样的！不一样时，使用Additive Attention
+    # Shape of keys:       (batch_size, no. of key-value pairs, d)  # k 和 v 的序列长度需要是一样的！
+    # Shape of values:     (batch_size, no. of key-value pairs, value dimension)
+    # Shape of valid_lens: (batch_size,) or (batch_size, no. of queries)
+    def forward(self, queries, keys, values, valid_lens=None):
+        d = queries.shape[-1]
+        # Swap the last two dimensions of keys with keys.transpose(1, 2)
+        scores = torch.bmm(queries, keys.transpose(1, 2)) / math.sqrt(d)
+        self.attention_weights = masked_softmax(scores, valid_lens)
+        return torch.bmm(self.dropout(self.attention_weights), values)
+
+
+def transpose_qkv(X, num_heads):
+    """Transposition for parallel computation of multiple attention heads.
+
+    Defined in :numref:`sec_multihead-attention`"""
+    # Shape of input `X`:
+    # (`batch_size`, no. of queries or key-value pairs, `num_hiddens`).
+    # Shape of output `X`:
+    # (`batch_size`, no. of queries or key-value pairs, `num_heads`,
+    # `num_hiddens` / `num_heads`)
+    X = X.reshape(X.shape[0], X.shape[1], num_heads, -1)
+
+    # Shape of output `X`:
+    # (`batch_size`, `num_heads`, no. of queries or key-value pairs,
+    # `num_hiddens` / `num_heads`)
+    X = X.permute(0, 2, 1, 3)
+
+    # Shape of `output`:
+    # (`batch_size` * `num_heads`, no. of queries or key-value pairs,
+    # `num_hiddens` / `num_heads`)
+    return X.reshape(-1, X.shape[2], X.shape[3])
+
+
+def transpose_output(X, num_heads):
+    """Reverse the operation of `transpose_qkv`.
+
+    Defined in :numref:`sec_multihead-attention`"""
+    X = X.reshape(-1, num_heads, X.shape[1], X.shape[2])
+    X = X.permute(0, 2, 1, 3)
+    return X.reshape(X.shape[0], X.shape[1], -1)
+
+
+class MultiHeadAttention(nn.Module):
+    """Multi-head attention.
+
+    Defined in :numref:`sec_multihead-attention`"""
+    def __init__(self, key_size, query_size, value_size, num_hiddens,
+                 num_heads, dropout, bias=False, **kwargs):
+        super(MultiHeadAttention, self).__init__(**kwargs)
+        self.num_heads = num_heads
+        self.attention = DotProductAttention(dropout)
+        self.W_q = nn.Linear(query_size, num_hiddens, bias=bias)
+        self.W_k = nn.Linear(key_size, num_hiddens, bias=bias)
+        self.W_v = nn.Linear(value_size, num_hiddens, bias=bias)
+        self.W_o = nn.Linear(num_hiddens, num_hiddens, bias=bias)
+
+    def forward(self, queries, keys, values, valid_lens):
+        # Shape of `queries`, `keys`, or `values`:
+        # (`batch_size`, no. of queries or key-value pairs, `num_hiddens`)
+        # Shape of `valid_lens`:
+        # (`batch_size`,) or (`batch_size`, no. of queries)
+        # After transposing, shape of output `queries`, `keys`, or `values`:
+        # (`batch_size` * `num_heads`, no. of queries or key-value pairs,
+        # `num_hiddens` / `num_heads`)
+        queries = transpose_qkv(self.W_q(queries), self.num_heads)
+        keys = transpose_qkv(self.W_k(keys), self.num_heads)
+        values = transpose_qkv(self.W_v(values), self.num_heads)
+
+        if valid_lens is not None:
+            # On axis 0, copy the first item (scalar or vector) for
+            # `num_heads` times, then copy the next item, and so on
+            valid_lens = torch.repeat_interleave(
+                valid_lens, repeats=self.num_heads, dim=0)
+
+        # Shape of `output`: (`batch_size` * `num_heads`, no. of queries,
+        # `num_hiddens` / `num_heads`)
+        output = self.attention(queries, keys, values, valid_lens)
+
+        # Shape of `output_concat`:
+        # (`batch_size`, no. of queries, `num_hiddens`)
+        output_concat = transpose_output(output, self.num_heads)
+        return self.W_o(output_concat)
+
+
+class PositionWiseFFN(nn.Module):
+    """基于位置的前馈网络"""
+    def __init__(self, ffn_num_input, ffn_num_hiddens, ffn_num_outputs,
+                 **kwargs):
+        super(PositionWiseFFN, self).__init__(**kwargs)
+        self.dense1 = nn.Linear(ffn_num_input, ffn_num_hiddens)
+        self.relu = nn.ReLU()
+        self.dense2 = nn.Linear(ffn_num_hiddens, ffn_num_outputs)
+
+    def forward(self, X):
+        return self.dense2(self.relu(self.dense1(X)))
+
+
+class AddNorm(nn.Module):
+    """残差连接后进行层规范化"""
+    def __init__(self, normalized_shape, dropout, **kwargs):
+        super(AddNorm, self).__init__(**kwargs)
+        self.dropout = nn.Dropout(dropout)
+        self.ln = nn.LayerNorm(normalized_shape)
+
+    def forward(self, X, Y):
+        return self.ln(self.dropout(Y) + X)  # residual connect
+
+
+class AttentionBlock(nn.Module):
+    def __init__(self, key_size, query_size, value_size, num_hiddens,
+                 norm_shape, ffn_num_input, ffn_num_hiddens, num_heads,
+                 dropout, use_bias=False, **kwargs):
+        super(AttentionBlock, self).__init__(**kwargs)
+        self.attention = MultiHeadAttention(
+            key_size, query_size, value_size, num_hiddens, num_heads, dropout, use_bias)
+        self.addnorm1 = AddNorm(norm_shape, dropout)
+        self.ffn = PositionWiseFFN(ffn_num_input, ffn_num_hiddens, num_hiddens)
+        self.addnorm2 = AddNorm(norm_shape, dropout)
+
+    def forward(self, q, k, v, valid_lens):
+        Y = self.addnorm1(q, self.attention(q, k, v, valid_lens))
+        return self.addnorm2(Y, self.ffn(Y))
+
+
+class AttentionEncoder(nn.Module):
+    def __init__(self, key_size, query_size, value_size,
+                 num_hiddens, norm_shape, ffn_num_input, ffn_num_hiddens,
+                 num_heads, num_layers, dropout, use_bias=False, **kwargs):
+        super(AttentionEncoder, self).__init__(**kwargs)
+        self.num_hiddens = num_hiddens
+        self.pos_encoding = PositionalEncoding(num_hiddens, dropout)
+        self.blks = nn.Sequential()
+        for i in range(num_layers):
+            self.blks.add_module("block"+str(i),
+                AttentionBlock(
+                    key_size, query_size, value_size, num_hiddens,
+                    norm_shape, ffn_num_input, ffn_num_hiddens,
+                    num_heads, dropout, use_bias))
+
+    def forward(self, q, x, valid_lens, *args):
+        q = self.pos_encoding(q)
+        x = self.pos_encoding(x)
+
+        k, v = x, x
+        for i, blk in enumerate(self.blks):
+            # 第一层：目标物品为query，历史病情表示为key&value，
+            #        用不同的注意力权重，聚合与该物品有关的历史病情表示q
+            # 后面层：建模第一层聚合的与该物品有关的历史病情表示q，与历史病情之间的联系
+            q = blk(q, k, v, valid_lens)
+        return q

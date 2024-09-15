@@ -14,7 +14,7 @@ from dataset.unified import (SourceDataFrames,
                              list_selected_prescriptions_columns)
 from utils.config import HeteroGraphConfig, MappingManager, GNNConfig, max_adm_length
 from utils.enum_type import FeatureType
-from model.layers import LinksPredictor, SingelGnn, GraphEmbeddingLayer, AdditiveAttention
+from model.layers import LinksPredictor, SingelGnn, GraphEmbeddingLayer, AttentionEncoder
 
 
 class BackBoneV2(nn.Module):
@@ -69,7 +69,12 @@ class BackBoneV2(nn.Module):
         })
 
         if not self.is_gnn_only:
-            self.attention = AdditiveAttention(num_hiddens=self.h_dim, dropout=0.1)
+            self.attention = AttentionEncoder(
+                self.h_dim, self.h_dim, self.h_dim,
+                self.h_dim, norm_shape=self.h_dim,
+                ffn_num_input=self.h_dim, ffn_num_hiddens=2*self.h_dim,
+                num_heads=8, num_layers=num_enc_layers,
+                dropout=0.1, use_bias=False)
 
         self.gnn = SingelGnn(self.h_dim, self.gnn_conf.gnn_type, self.gnn_conf.gnn_layer_num)
         self.gnn = to_hetero(self.gnn, metadata=(self.gnn_conf.node_types, self.gnn_conf.edge_types))
@@ -201,10 +206,9 @@ class BackBoneV2(nn.Module):
             # 相当于用当前天的目标物品，去问“要怎样注意对之前天的病情？”
             if not self.is_gnn_only:
                 att_patient_conditions = self.attention(
-                    queries=cur_day_seq_to_be_judged_emb,
-                    keys=pre_day_patient_conditions,
-                    values=pre_day_patient_conditions,
-                    valid_lens=None
+                    cur_day_seq_to_be_judged_emb,
+                    pre_day_patient_conditions,  # k & v
+                    None
                 )
             else:
                 # 不用注意力的话，就直接取昨天的患者病情表示
